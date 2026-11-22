@@ -1,0 +1,9 @@
+# Local Kubernetes (kind). The image is side loaded with `kind load docker-image`.
+environment: local
+image:
+  repository: deploytrack
+  tag: local
+  pullPolicy: Never
+autoscaling:
+  enabled: false
+replicaCount: 2

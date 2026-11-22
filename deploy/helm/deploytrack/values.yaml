@@ -1,0 +1,44 @@
+replicaCount: 2
+
+image:
+  repository: deploytrack
+  tag: ""          # defaults to .Chart.AppVersion; CI sets the commit SHA
+  pullPolicy: IfNotPresent
+
+environment: dev
+
+config:
+  storageBackend: memory     # dynamodb in AWS, with IRSA or Pod Identity on EKS
+  dynamodbTable: ""
+  awsRegion: us-east-1
+  logLevel: INFO
+
+serviceAccount:
+  create: true
+  annotations: {}            # e.g. eks.amazonaws.com/role-arn for IRSA
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: /metrics

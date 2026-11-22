@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+junit.xml
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+plan.txt
+crash.log
+*.auto.tfvars
+.terraform-plugin-cache/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store

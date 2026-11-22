@@ -1,0 +1,32 @@
+# Checkov runs in CI and must pass. Each skip below is a deliberate, documented
+# decision, not a silenced warning. Revisit them in docs/adr/0006-security-baseline.md.
+framework:
+  - terraform
+  - dockerfile
+  - github_actions
+quiet: true
+compact: true
+skip-check:
+  # TLS: HTTP is used only until a domain and ACM certificate are supplied.
+  # Setting certificate_arn switches HTTP to a 301 redirect and adds a TLS 1.3 listener.
+  - CKV_AWS_2
+  - CKV_AWS_260
+  - CKV_AWS_378
+  # Encryption with AWS managed keys is on for logs and DynamoDB. Customer managed
+  # KMS keys add cost and key policy overhead not justified for this workload's data.
+  - CKV_AWS_119
+  - CKV_AWS_158
+  # Log retention is set per environment (7, 14, 90 days) as a cost decision.
+  - CKV_AWS_338
+  # Deletion protection is a variable that is true in prod; checkov cannot resolve it.
+  - CKV_AWS_150
+  # ALB access logs and WAF are on the roadmap for prod (see README roadmap).
+  - CKV_AWS_91
+  - CKV2_AWS_28
+  # AZ selection is pinned by count via slice(); zone growth cannot change subnets.
+  - CKV_AWS_394
+  # Terraform state bucket: versioned and TLS only; replication, access logs and
+  # event notifications are disproportionate for a single account state store.
+  - CKV_AWS_18
+  - CKV_AWS_144
+  - CKV2_AWS_62

@@ -1,0 +1,187 @@
+name: ci
+
+# Every pull request and every push to main must pass all five jobs.
+# Nothing here touches AWS, so CI works on forks and needs no secrets.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: 1.17.2
+  TFLINT_VERSION: v0.66.0
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  app:
+    name: App lint and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Unit and integration tests (85% coverage gate)
+        run: pytest
+
+  container:
+    name: Container build, scan, smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          load: true
+          push: false
+          tags: deploytrack:ci
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Vulnerability scan (fail on fixable high or critical)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: deploytrack:ci
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
+      - name: Run container and smoke test
+        run: |
+          docker run -d --name app -p 8080:8080 --read-only deploytrack:ci
+          scripts/smoke_test.sh http://localhost:8080 "${{ github.sha }}" 60
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs app || true
+
+  terraform:
+    name: Terraform fmt, validate, lint, security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff infra
+      - name: terraform validate (every root module)
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          for dir in infra/bootstrap infra/envs/dev infra/envs/staging infra/envs/prod; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+          github_token: ${{ github.token }}
+      - name: tflint
+        working-directory: infra
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: checkov (IaC and Dockerfile security policy)
+        run: |
+          pip install checkov==3.4.6
+          checkov --config-file .checkov.yaml -d infra
+          checkov --config-file .checkov.yaml -f app/Dockerfile
+
+  kubernetes:
+    name: Helm lint and kind deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.19.0
+      - name: helm lint
+        run: |
+          helm lint deploy/helm/deploytrack --strict
+          helm lint deploy/helm/deploytrack --strict -f deploy/helm/deploytrack/values-kind.yaml
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: deploytrack
+          config: deploy/kind/cluster.yaml
+      - name: Build and side load image
+        run: |
+          docker build -t deploytrack:local --build-arg APP_VERSION=local app
+          kind load docker-image deploytrack:local --name deploytrack
+      - name: helm install and wait for rollout
+        run: |
+          helm upgrade --install dt deploy/helm/deploytrack \
+            -f deploy/helm/deploytrack/values-kind.yaml --wait --timeout 3m
+          kubectl rollout status deployment/dt-deploytrack --timeout=120s
+      - name: Smoke test through the Service
+        run: |
+          kubectl port-forward svc/dt-deploytrack 8080:80 >/tmp/pf.log 2>&1 &
+          sleep 3
+          scripts/smoke_test.sh http://localhost:8080 local 60
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl describe pods -l app.kubernetes.io/instance=dt
+          kubectl logs -l app.kubernetes.io/instance=dt --tail=100
+
+  workflows:
+    name: Workflow and shell lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: actionlint (runs shellcheck on every run block)
+        run: |
+          pip install actionlint-py==1.7.12.25
+          actionlint
+      - name: shellcheck scripts
+        run: shellcheck scripts/*.sh

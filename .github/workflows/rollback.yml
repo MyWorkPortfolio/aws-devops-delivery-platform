@@ -1,0 +1,54 @@
+name: rollback
+
+# Roll an environment back by redeploying a previous, already scanned image tag.
+# Images are immutable, so "rollback" is just "deploy a known good SHA".
+# Runbook: docs/runbooks/failed-deployment.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to roll back
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      image_tag:
+        description: Known good commit SHA (see DeployTrack /api/v1/deployments)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve commit
+    runs-on: ubuntu-24.04
+    outputs:
+      committed_at: ${{ steps.commit.outputs.committed_at }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: commit
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::image_tag must be a full 40 character commit SHA"; exit 1; }
+          echo "committed_at=$(git log -1 --format=%cI "$IMAGE_TAG")" >> "$GITHUB_OUTPUT"
+
+  rollback:
+    needs: resolve
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image_tag: ${{ inputs.image_tag }}
+      committed_at: ${{ needs.resolve.outputs.committed_at }}

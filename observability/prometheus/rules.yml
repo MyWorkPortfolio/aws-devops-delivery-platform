@@ -1,0 +1,42 @@
+# Same golden signal thresholds as the CloudWatch alarms in infra/modules/observability,
+# so an alert means the same thing locally, on Kubernetes and on ECS.
+groups:
+  - name: deploytrack.recording
+    rules:
+      - record: deploytrack:http_requests:rate5m
+        expr: sum by (route) (rate(http_requests_total[5m]))
+      - record: deploytrack:http_5xx_ratio:rate5m
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_requests_total[5m])), 1e-9)
+      - record: deploytrack:http_latency_p95:5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+
+  - name: deploytrack.alerts
+    rules:
+      - alert: DeployTrackDown
+        expr: up{job="deploytrack"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: DeployTrack target is down
+          runbook: docs/runbooks/failed-deployment.md
+
+      - alert: DeployTrackHighErrorRate
+        expr: deploytrack:http_5xx_ratio:rate5m > 0.02
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx ratio is {{ $value | humanizePercentage }} (threshold 2%)"
+          runbook: docs/runbooks/high-error-rate.md
+
+      - alert: DeployTrackHighLatency
+        expr: deploytrack:http_latency_p95:5m > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency is {{ $value | humanizeDuration }} (threshold 500ms)"
+          runbook: docs/runbooks/high-latency.md

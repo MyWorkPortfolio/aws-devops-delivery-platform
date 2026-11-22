@@ -1,0 +1,96 @@
+name: deploy
+
+# Build once, promote the same immutable image: dev -> staging -> prod.
+# Each stage applies Terraform, waits for ECS steady state, smoke tests the new
+# version, and records the outcome in DeployTrack itself (DORA metrics).
+# prod is a GitHub Environment with required reviewers, so promotion pauses there.
+#
+# Disabled until the repository variable AWS_DEPLOY_ENABLED is "true"
+# (see README "Deploying to your own AWS account").
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "**/*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push image
+    if: vars.AWS_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      committed_at: ${{ steps.meta.outputs.committed_at }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: meta
+        run: |
+          echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "committed_at=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build and push (SBOM and provenance attached)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/deploytrack:${{ github.sha }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  dev:
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: dev
+      image_tag: ${{ needs.build.outputs.image_tag }}
+      committed_at: ${{ needs.build.outputs.committed_at }}
+
+  staging:
+    needs: [build, dev]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: staging
+      image_tag: ${{ needs.build.outputs.image_tag }}
+      committed_at: ${{ needs.build.outputs.committed_at }}
+
+  prod:
+    needs: [build, staging]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: prod
+      image_tag: ${{ needs.build.outputs.image_tag }}
+      committed_at: ${{ needs.build.outputs.committed_at }}

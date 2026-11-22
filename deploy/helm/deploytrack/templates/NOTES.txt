@@ -1,0 +1,5 @@
+DeployTrack {{ include "deploytrack.tag" . }} deployed to environment "{{ .Values.environment }}".
+
+  kubectl port-forward svc/{{ include "deploytrack.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/healthz
+  open http://localhost:8080/docs
