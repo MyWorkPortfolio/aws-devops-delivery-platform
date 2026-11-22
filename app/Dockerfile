@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- build stage: resolve dependencies once, cached by requirements.txt ----
-FROM python:3.13-slim AS build
+FROM python:3.15-slim AS build
 WORKDIR /build
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --prefix=/install -r requirements.txt
 
 # ---- runtime stage: no compilers, no pip cache, non root user ----
-FROM python:3.13-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 ARG APP_VERSION=0.0.0-dev
 ARG GIT_SHA=unknown
